@@ -14,9 +14,9 @@ import numpy as np
 import torch
 
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from variational_reasoning.code.ptrm import utils
+from ptrm import utils
 
 
 def parse_args() -> argparse.Namespace:

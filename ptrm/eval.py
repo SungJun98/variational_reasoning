@@ -18,10 +18,10 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from variational_reasoning.code.optim.ivon import IVON
-from variational_reasoning.code.ptrm import utils
+from optim.ivon import IVON
+from ptrm import utils
 
 
 Method = Literal[

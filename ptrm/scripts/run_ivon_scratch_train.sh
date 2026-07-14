@@ -6,21 +6,21 @@ set -euo pipefail
 # Additional train_scratch.py options can be appended directly to this command.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="${PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/../../../.." && pwd)}"
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 
 PYTHON="${PYTHON:-python3}"
 TRM_REPO="${TRM_REPO:-${PROJECT_ROOT}/third_party/TinyRecursiveModels}"
 DATASET="${DATASET:-${PROJECT_ROOT}/data/sudoku-extreme-1k-aug-1000}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/ivon_scratch}"
 RUN_NAME="${RUN_NAME:-ivon_scratch_baseline_seed0}"
-SCHEDULE_JSON="${SCHEDULE_JSON:-${PROJECT_ROOT}/variational_reasoning/code/ptrm/configs/ivon_scratch_schedule.json}"
+SCHEDULE_JSON="${SCHEDULE_JSON:-${PROJECT_ROOT}/ptrm/configs/ivon_scratch_schedule.json}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 export DISABLE_COMPILE="${DISABLE_COMPILE:-1}"
 
 ARGS=(
-  -m variational_reasoning.code.ptrm.train_scratch
+  -m ptrm.train_scratch
   --trm-repo "${TRM_REPO}"
   --dataset "${DATASET}"
   --output-root "${OUTPUT_ROOT}"

@@ -6,7 +6,7 @@ set -euo pipefail
 # Additional eval.py options can be appended directly to this command.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="${PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/../../../.." && pwd)}"
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 
 PYTHON="${PYTHON:-python3}"
 TRM_REPO="${TRM_REPO:-${PROJECT_ROOT}/third_party/TinyRecursiveModels}"
@@ -36,7 +36,7 @@ export DISABLE_COMPILE="${DISABLE_COMPILE:-1}"
 
 mkdir -p "${RESULT_DIR}"
 cd "${PROJECT_ROOT}"
-exec "${PYTHON}" -m variational_reasoning.code.ptrm.eval \
+exec "${PYTHON}" -m ptrm.eval \
   --trm-repo "${TRM_REPO}" \
   --dataset "${DATASET}" \
   --ivon-checkpoint "${CHECKPOINT}" \

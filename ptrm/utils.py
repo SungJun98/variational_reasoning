@@ -14,7 +14,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from variational_reasoning.code.optim.ivon import IVON
+from optim.ivon import IVON
 
 
 EXACT_FORMAT_VERSION = 3
@@ -502,7 +502,7 @@ def train_ivon_batch(
     dense_optimizer = train_state.optimizers[-1]
     sparse_optimizer = train_state.optimizers[0] if len(train_state.optimizers) > 1 else None
     if not isinstance(dense_optimizer, IVON):
-        raise TypeError("Dense optimizer must be variational_reasoning.code.optim.ivon.IVON.")
+        raise TypeError("Dense optimizer must be optim.ivon.IVON.")
 
     if sparse_optimizer is not None:
         sparse_default = compute_lr(args.puzzle_emb_lr, config, train_state)
