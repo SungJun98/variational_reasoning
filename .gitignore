@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+
+.env
+.venv/
+wandb/
+
+data/
+outputs/
+third_party/
+
+*.pt
+*.pth
+*.ckpt
+*.log
