@@ -8,12 +8,13 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 
 PYTHON="${PYTHON:-python3}"
+OPTIMIZER="${OPTIMIZER:-ivon}"
 TRM_REPO="${TRM_REPO:-${PROJECT_ROOT}/third_party/TinyRecursiveModels}"
 DATASET="${DATASET:-${PROJECT_ROOT}/data/sudoku-extreme-1k-aug-1000}"
 BASE_CHECKPOINT="${BASE_CHECKPOINT:-}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/ivon_ft}"
-RUN_NAME="${RUN_NAME:-ivon_ft_reference_seed0}"
-SCHEDULE_JSON="${SCHEDULE_JSON:-${PROJECT_ROOT}/ptrm/configs/ivon_ft_schedule.json}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/${OPTIMIZER}_ft}"
+RUN_NAME="${RUN_NAME:-${OPTIMIZER}_ft_reference_seed0}"
+SCHEDULE_JSON="${SCHEDULE_JSON:-${PROJECT_ROOT}/ptrm/configs/${OPTIMIZER}_ft_schedule.json}"
 
 if [[ -z "${BASE_CHECKPOINT}" ]]; then
   echo "BASE_CHECKPOINT must point to the pretrained PTRM/TRM checkpoint to fine-tune." >&2
@@ -26,6 +27,7 @@ export DISABLE_COMPILE="${DISABLE_COMPILE:-1}"
 
 ARGS=(
   -m ptrm.train_ft
+  --optimizer "${OPTIMIZER}"
   --trm-repo "${TRM_REPO}"
   --dataset "${DATASET}"
   --base-checkpoint "${BASE_CHECKPOINT}"
@@ -48,7 +50,7 @@ ARGS=(
 [[ -z "${RESUME_CHECKPOINT:-}" ]] || ARGS+=(--resume-checkpoint "${RESUME_CHECKPOINT}")
 
 if [[ "${WANDB_ENABLED:-0}" == "1" ]]; then
-  ARGS+=(--wandb --wandb-project "${WANDB_PROJECT:-ptrm-ivon-fine-tuning}" --wandb-mode "${WANDB_MODE:-online}")
+  ARGS+=(--wandb --wandb-project "${WANDB_PROJECT:-ptrm-${OPTIMIZER}-fine-tuning}" --wandb-mode "${WANDB_MODE:-online}")
   [[ -z "${WANDB_ENTITY:-}" ]] || ARGS+=(--wandb-entity "${WANDB_ENTITY}")
   [[ -z "${WANDB_GROUP:-}" ]] || ARGS+=(--wandb-group "${WANDB_GROUP}")
 fi

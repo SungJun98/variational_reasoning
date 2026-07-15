@@ -1,0 +1,4 @@
+{
+  "dense_lr": {"type": "constant", "value": 0.0001},
+  "puzzle_emb_lr": {"type": "constant", "value": 0.01}
+}

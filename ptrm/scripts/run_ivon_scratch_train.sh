@@ -9,11 +9,12 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 
 PYTHON="${PYTHON:-python3}"
+OPTIMIZER="${OPTIMIZER:-ivon}"
 TRM_REPO="${TRM_REPO:-${PROJECT_ROOT}/third_party/TinyRecursiveModels}"
 DATASET="${DATASET:-${PROJECT_ROOT}/data/sudoku-extreme-1k-aug-1000}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/ivon_scratch}"
-RUN_NAME="${RUN_NAME:-ivon_scratch_baseline_seed0}"
-SCHEDULE_JSON="${SCHEDULE_JSON:-${PROJECT_ROOT}/ptrm/configs/ivon_scratch_schedule.json}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/${OPTIMIZER}_scratch}"
+RUN_NAME="${RUN_NAME:-${OPTIMIZER}_scratch_baseline_seed0}"
+SCHEDULE_JSON="${SCHEDULE_JSON:-${PROJECT_ROOT}/ptrm/configs/${OPTIMIZER}_scratch_schedule.json}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
@@ -21,6 +22,7 @@ export DISABLE_COMPILE="${DISABLE_COMPILE:-1}"
 
 ARGS=(
   -m ptrm.train_scratch
+  --optimizer "${OPTIMIZER}"
   --trm-repo "${TRM_REPO}"
   --dataset "${DATASET}"
   --output-root "${OUTPUT_ROOT}"
@@ -38,7 +40,7 @@ ARGS=(
 [[ -z "${RESUME_CHECKPOINT:-}" ]] || ARGS+=(--resume-checkpoint "${RESUME_CHECKPOINT}")
 
 if [[ "${WANDB_ENABLED:-0}" == "1" ]]; then
-  ARGS+=(--wandb --wandb-project "${WANDB_PROJECT:-ptrm-ivon-from-scratch}" --wandb-mode "${WANDB_MODE:-online}")
+  ARGS+=(--wandb --wandb-project "${WANDB_PROJECT:-ptrm-${OPTIMIZER}-from-scratch}" --wandb-mode "${WANDB_MODE:-online}")
   [[ -z "${WANDB_ENTITY:-}" ]] || ARGS+=(--wandb-entity "${WANDB_ENTITY}")
   [[ -z "${WANDB_GROUP:-}" ]] || ARGS+=(--wandb-group "${WANDB_GROUP}")
 fi

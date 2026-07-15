@@ -1,11 +1,21 @@
 # Variational Reasoning
 
 Minimal code for training a PTRM/TRM model from scratch or fine-tuning a
-compatible checkpoint with IVON, followed by posterior-sampling evaluation.
+compatible checkpoint with IVON, SOAP, or EVON. IVON and EVON checkpoints also
+support posterior-sampling evaluation; SOAP checkpoints support mean-only
+evaluation.
 
 ## Setup
 
-Use Python with CUDA-enabled PyTorch and install the packages imported by this project, including `numpy`, `tqdm`, and `ivon`.
+Use Python with CUDA-enabled PyTorch, then install the runtime dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+EVON is pinned to the reviewed upstream commit. SOAP is included in
+`optim/soap.py`; attribution and dependency licenses are recorded in
+`THIRD_PARTY_NOTICES.md`.
 
 The launch scripts expect this directory layout by default:
 
@@ -69,29 +79,40 @@ Regenerate the CSV before sharing newer results because the listed running exper
 Run from the repository root:
 
 ```bash
-./ptrm/scripts/run_ivon_scratch_train.sh
+./ptrm/scripts/run_optimizer_scratch_train.sh
 ```
 
 Common settings can be changed with environment variables:
 
 ```bash
 RUN_NAME=my_run CUDA_VISIBLE_DEVICES=1 TRAIN_STEPS=50000 \
-  ./ptrm/scripts/run_ivon_scratch_train.sh
+  ./ptrm/scripts/run_optimizer_scratch_train.sh
 ```
 
 Additional training options can be appended directly:
 
 ```bash
-./ptrm/scripts/run_ivon_scratch_train.sh \
+./ptrm/scripts/run_optimizer_scratch_train.sh \
   --ivon-noise-scale 0.3 --history-interval 50
 ```
 
 The default learning-rate schedule is in `ptrm/configs/ivon_scratch_schedule.json`.
 
+Select SOAP or EVON through the same launcher:
+
+```bash
+OPTIMIZER=soap ./ptrm/scripts/run_optimizer_scratch_train.sh
+OPTIMIZER=evon ./ptrm/scripts/run_optimizer_scratch_train.sh
+```
+
+The launcher automatically selects the matching `soap_*` or `evon_*` schedule.
+For large models, tune `--soap-max-precond-dim` or `--evon-max-precond-dim` to
+bound Shampoo state and eigendecomposition cost.
+
 ## Fine-Tune a Checkpoint
 
-Fine-tuning uses the same model, IVON optimizer, exact-resume checkpoint format,
-and evaluator as from-scratch training. A compatible pretrained PTRM/TRM
+Fine-tuning uses the same model, optimizer factory, exact-resume checkpoint
+format, and evaluator as from-scratch training. A compatible pretrained PTRM/TRM
 checkpoint is required and is not bundled with this repository.
 
 The base checkpoint may be either a raw model state dictionary or a checkpoint
@@ -103,7 +124,7 @@ Run the reference fine-tuning configuration from the repository root:
 
 ```bash
 BASE_CHECKPOINT=/path/to/base-checkpoint.pt \
-  ./ptrm/scripts/run_ivon_ft_train.sh
+  ./ptrm/scripts/run_optimizer_ft_train.sh
 ```
 
 Common settings can be changed with environment variables:
@@ -111,7 +132,7 @@ Common settings can be changed with environment variables:
 ```bash
 BASE_CHECKPOINT=/path/to/base-checkpoint.pt \
 RUN_NAME=my_ft_run CUDA_VISIBLE_DEVICES=1 TRAIN_STEPS=500 \
-  ./ptrm/scripts/run_ivon_ft_train.sh
+  ./ptrm/scripts/run_optimizer_ft_train.sh
 ```
 
 Additional non-scheduled options can be appended directly. Options appended to
@@ -119,7 +140,7 @@ the command take precedence over launcher defaults:
 
 ```bash
 BASE_CHECKPOINT=/path/to/base-checkpoint.pt \
-  ./ptrm/scripts/run_ivon_ft_train.sh \
+  ./ptrm/scripts/run_optimizer_ft_train.sh \
   --ivon-noise-scale 0.8 --ivon-hess-init 4.0
 ```
 
@@ -133,13 +154,17 @@ The schedule controls dense LR, puzzle-embedding LR, ESS, and the Hessian
 approximation at every optimizer step. To override one of those values, copy
 the schedule JSON, edit it, and pass its path through `SCHEDULE_JSON`.
 
+SOAP and EVON fine-tuning use `OPTIMIZER=soap` or `OPTIMIZER=evon`. EVON reads
+`evon_ess` from its schedule; SOAP only uses the dense and puzzle-embedding LR
+schedules.
+
 ### Weights & Biases
 
 W&B logging is disabled by default. Enable it explicitly when needed:
 
 ```bash
 WANDB_ENABLED=1 WANDB_PROJECT=my-project \
-  ./ptrm/scripts/run_ivon_scratch_train.sh
+  ./ptrm/scripts/run_optimizer_scratch_train.sh
 ```
 
 Set `WANDB_ENTITY` only when an entity is required.
@@ -150,17 +175,28 @@ The generic evaluator accepts final checkpoints produced by either training
 entrypoint:
 
 ```bash
-IVON_CHECKPOINT=outputs/ivon_ft/my_ft_run/checkpoints/checkpoint.pt \
-  ./ptrm/scripts/run_ivon_eval.sh
+CHECKPOINT=outputs/ivon_ft/my_ft_run/checkpoints/checkpoint.pt \
+  ./ptrm/scripts/run_optimizer_eval.sh
 ```
 
 Example with posterior comparison and 20 samples:
 
 ```bash
-IVON_CHECKPOINT=outputs/ivon_scratch/my_run/checkpoints/checkpoint.pt \
-METHOD=ivon_compare_selection K=20 \
-  ./ptrm/scripts/run_ivon_eval.sh
+CHECKPOINT=outputs/ivon_scratch/my_run/checkpoints/checkpoint.pt \
+METHOD=compare_selection K=20 \
+  ./ptrm/scripts/run_optimizer_eval.sh
 ```
+
+For EVON, use the same posterior methods. For SOAP, use deterministic mean-only
+evaluation:
+
+```bash
+CHECKPOINT=outputs/soap_ft/my_run/checkpoints/checkpoint.pt METHOD=mean_only \
+  ./ptrm/scripts/run_optimizer_eval.sh
+```
+
+The older `run_ivon_*` scripts, `IVON_CHECKPOINT` environment variable, and
+`ivon_*` method names remain accepted as compatibility aliases.
 
 `run_ivon_scratch_eval.sh` remains available as a compatibility wrapper that
 selects `outputs/ivon_scratch/<run-name>/checkpoints/checkpoint.pt` from

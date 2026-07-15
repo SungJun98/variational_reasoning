@@ -16,11 +16,12 @@ import torch
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from optim.factory import add_optimizer_arguments
 from ptrm import utils
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Single-run PTRM/TRM IVON from-scratch training.")
+    parser = argparse.ArgumentParser(description="Single-run PTRM/TRM optimizer from-scratch training.")
     parser.add_argument("--trm-repo", type=Path, required=True)
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
@@ -61,6 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ivon-update-transform", choices=("clip", "none", "muon_whiten"), default="clip")
     parser.add_argument("--ivon-muon-whiten-eps", type=float, default=1e-8)
     parser.add_argument("--ivon-muon-ns-steps", type=int, default=5)
+    add_optimizer_arguments(parser)
 
     parser.add_argument("--carry-mode", choices=("persistent", "reset_every_step"), default="persistent")
     parser.add_argument("--h-cycles", dest="H_cycles", type=int, default=3)
@@ -101,7 +103,7 @@ def prepare_run(args: argparse.Namespace, schedule: dict[str, Any]) -> tuple[Pat
     run_root = args.output_root / args.run_name
     run_root.mkdir(parents=True, exist_ok=True)
     status_path = run_root / "status.md"
-    status_path.write_text("# PTRM IVON Scratch Training\n\n")
+    status_path.write_text(f"# PTRM {args.optimizer.upper()} Scratch Training\n\n")
     utils.write_json(run_root / "configs" / "args.json", utils.serializable_args(args))
     utils.write_json(run_root / "configs" / "schedule.json", schedule)
     command = os.environ.get("VR_LAUNCH_COMMAND", " ".join([sys.executable] + sys.argv))
@@ -112,7 +114,7 @@ def prepare_run(args: argparse.Namespace, schedule: dict[str, Any]) -> tuple[Pat
 def setup_device_and_seed(args: argparse.Namespace) -> torch.device:
     device = torch.device(args.device)
     if device.type != "cuda":
-        raise ValueError("PTRM IVON training expects a CUDA device.")
+        raise ValueError("PTRM optimizer training expects a CUDA device.")
     torch.cuda.set_device(device)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -123,8 +125,11 @@ def setup_device_and_seed(args: argparse.Namespace) -> torch.device:
 
 def main() -> None:
     args = parse_args()
-    if args.ivon_mc_samples != 1:
-        raise ValueError("This recurrent IVON runner supports --ivon-mc-samples 1 only.")
+    if args.optimizer in ("ivon", "evon") and args.ivon_mc_samples != 1:
+        raise ValueError(
+            "This recurrent posterior-optimizer runner supports "
+            "--ivon-mc-samples 1 only."
+        )
     if args.q_loss_weight < 0:
         raise ValueError("--q-loss-weight must be non-negative.")
     for name in ("history_interval", "status_interval", "checkpoint_interval"):
@@ -180,7 +185,9 @@ def main() -> None:
         if train_state.step >= stop_step:
             raise ValueError(f"Checkpoint step {train_state.step} is already >= stop_step {stop_step}.")
 
-    wandb_run = utils.init_wandb(args, run_root, schedule, job_type="ptrm_ivon_scratch")
+    wandb_run = utils.init_wandb(
+        args, run_root, schedule, job_type=f"ptrm_{args.optimizer}_scratch"
+    )
     history_path = run_root / "history.jsonl"
     start_time = time.time()
     start_step = train_state.step
@@ -190,7 +197,9 @@ def main() -> None:
     try:
         while train_state.step < stop_step:
             _set_name, batch, global_batch_size = batch_stream.next_batch()
-            last_metrics = utils.train_ivon_batch(config, train_state, batch, global_batch_size, args, schedule)
+            last_metrics = utils.train_optimizer_batch(
+                config, train_state, batch, global_batch_size, args, schedule
+            )
             if ema_helper is not None:
                 ema_helper.update(train_state.model)
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Iterable
-from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import math
@@ -14,22 +13,45 @@ from typing import Any, Literal
 
 import numpy as np
 import torch
+from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from optim.factory import (
+    create_optimizer,
+    move_optimizer_state_to_device,
+    optimizer_name,
+    optimizer_sampling_context,
+    supports_posterior_sampling,
+)
 from optim.ivon import IVON
 from ptrm import utils
 
 
 Method = Literal[
-    "ivon_parameter_sampling",
-    "ivon_antithetic_parameter_sampling",
-    "ivon_posterior_mean_q_selection",
-    "ivon_compare_selection",
+    "mean_only",
+    "posterior_parameter_sampling",
+    "antithetic_parameter_sampling",
+    "posterior_mean_q_selection",
+    "compare_selection",
 ]
+METHOD_ALIASES = {
+    "ivon_parameter_sampling": "posterior_parameter_sampling",
+    "ivon_antithetic_parameter_sampling": "antithetic_parameter_sampling",
+    "ivon_posterior_mean_q_selection": "posterior_mean_q_selection",
+    "ivon_compare_selection": "compare_selection",
+}
+METHOD_CHOICES = (
+    "mean_only",
+    "posterior_parameter_sampling",
+    "antithetic_parameter_sampling",
+    "posterior_mean_q_selection",
+    "compare_selection",
+    *METHOD_ALIASES.keys(),
+)
 IGNORE_LABEL_ID = -100
 
 
@@ -47,20 +69,17 @@ class EvalTotals:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate PTRM/TRM IVON checkpoint with posterior sampling.")
+    parser = argparse.ArgumentParser(description="Evaluate PTRM/TRM optimizer checkpoints.")
     parser.add_argument("--trm-repo", type=Path, required=True)
     parser.add_argument("--dataset", type=Path, required=True)
-    parser.add_argument("--ivon-checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--checkpoint", "--ivon-checkpoint", dest="checkpoint", type=Path, required=True
+    )
     parser.add_argument("--model-state-key", choices=("model_state_dict", "ema_model_state_dict"), default="model_state_dict")
     parser.add_argument(
         "--method",
-        choices=(
-            "ivon_parameter_sampling",
-            "ivon_antithetic_parameter_sampling",
-            "ivon_posterior_mean_q_selection",
-            "ivon_compare_selection",
-        ),
-        default="ivon_parameter_sampling",
+        choices=METHOD_CHOICES,
+        default="posterior_parameter_sampling",
     )
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--progress-json", type=Path, default=None)
@@ -69,7 +88,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-batch-size", type=int, default=128)
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--depth", type=int, default=16)
-    parser.add_argument("--ivon-posterior-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--posterior-scale",
+        "--ivon-posterior-scale",
+        dest="posterior_scale",
+        type=float,
+        default=1.0,
+    )
     parser.add_argument("--num-shards", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--limit-puzzles", type=int, default=None)
@@ -203,51 +228,50 @@ def create_wrapped_model_from_checkpoint(payload: dict[str, Any], metadata: Any,
 def dense_optimizer_parameters_from_checkpoint(
     model: torch.nn.Module,
     optimizer_state: dict[str, Any],
-) -> Any:
+) -> list[dict[str, Any]]:
     saved_groups = optimizer_state.get("param_groups")
     if not isinstance(saved_groups, list) or not saved_groups:
-        return list(model.parameters())
+        named_parameters = list(model.named_parameters())
+        return [
+            {
+                "params": [parameter for _, parameter in named_parameters],
+                "param_names": [name for name, _ in named_parameters],
+            }
+        ]
 
     parameters_by_name = dict(model.named_parameters())
-    parameter_groups = []
+    parameter_groups: list[dict[str, Any]] = []
     for saved_group in saved_groups:
         names = saved_group.get("param_names") if isinstance(saved_group, dict) else None
         saved_params = saved_group.get("params") if isinstance(saved_group, dict) else None
         if not isinstance(names, list) or not isinstance(saved_params, list) or len(names) != len(saved_params):
-            return list(model.parameters())
-        resolved = []
+            raise RuntimeError(
+                "Checkpoint optimizer groups require param_names for safe reconstruction."
+            )
+        resolved_parameters = []
         for saved_name in names:
             normalized = str(saved_name)
             for prefix in ("_orig_mod.", "module."):
                 normalized = normalized.removeprefix(prefix)
             if normalized not in parameters_by_name:
                 raise RuntimeError(f"Checkpoint dense optimizer parameter is missing from the model: {saved_name}")
-            resolved.append(parameters_by_name[normalized])
-        parameter_groups.append({"params": resolved, "param_names": list(names)})
+            resolved_parameters.append(parameters_by_name[normalized])
+        parameter_groups.append(
+            {"params": resolved_parameters, "param_names": list(names)}
+        )
     return parameter_groups
 
 
-def create_ivon_optimizer_from_checkpoint(
+def create_optimizer_from_checkpoint(
     model: torch.nn.Module,
+    optimizer_kind: str,
     payload_args: dict[str, Any],
     optimizer_state: dict[str, Any],
-) -> IVON:
-    return IVON(
+) -> Optimizer:
+    return create_optimizer(
+        optimizer_kind,
         dense_optimizer_parameters_from_checkpoint(model, optimizer_state),
-        lr=float(payload_args.get("lr", 1e-4)),
-        ess=float(payload_args.get("ivon_ess", 1e5)),
-        hess_init=float(payload_args.get("ivon_hess_init", 1.0)),
-        beta1=float(payload_args.get("beta1", 0.9)),
-        beta2=float(payload_args.get("ivon_beta2", 0.99999)),
-        weight_decay=float(payload_args.get("ivon_weight_decay", 1e-4)),
-        mc_samples=int(payload_args.get("ivon_mc_samples", 1)),
-        hess_approx=str(payload_args.get("ivon_hess_approx", "price")),
-        clip_radius=float(payload_args.get("ivon_clip_radius", float("inf"))),
-        debias=not bool(payload_args.get("no_ivon_debias", False)),
-        rescale_lr=not bool(payload_args.get("no_ivon_rescale_lr", False)),
-        update_transform=str(payload_args.get("ivon_update_transform", "clip")),
-        muon_whiten_eps=float(payload_args.get("ivon_muon_whiten_eps", 1e-8)),
-        muon_ns_steps=int(payload_args.get("ivon_muon_ns_steps", 5)),
+        payload_args,
     )
 
 
@@ -258,24 +282,12 @@ def normalize_model_state_dict_keys(state_dict: dict[str, Any]) -> dict[str, Any
     return state_dict
 
 
-def move_ivon_optimizer_state_to_device(optimizer: IVON) -> None:
-    device = optimizer._device
-    for group in optimizer.param_groups:
-        for key in ("momentum", "hess"):
-            value = group.get(key)
-            if isinstance(value, torch.Tensor):
-                group[key] = value.to(device)
-    for key, value in optimizer.state.items():
-        if isinstance(value, torch.Tensor):
-            optimizer.state[key] = value.to(device)
-
-
-def load_ivon_state(
+def load_optimizer_state(
     model: torch.nn.Module,
     payload: dict[str, Any],
     checkpoint_path: Path,
     model_state_key: str,
-) -> IVON:
+) -> Optimizer:
     if model_state_key not in payload:
         available = sorted(payload.keys())
         raise RuntimeError(f"Expected checkpoint payload with {model_state_key}. Available keys: {available}")
@@ -286,10 +298,25 @@ def load_ivon_state(
             f"Could not load model state {checkpoint_path}. "
             f"Missing keys: {result.missing_keys}. Unexpected keys: {result.unexpected_keys}."
         )
-    optimizer_state = payload["dense_optimizer_state_dict"]
-    optimizer = create_ivon_optimizer_from_checkpoint(model, payload.get("args") or {}, optimizer_state)
+    optimizer_state = payload.get(
+        "optimizer_state_dict", payload.get("dense_optimizer_state_dict")
+    )
+    if not isinstance(optimizer_state, dict):
+        raise RuntimeError("Checkpoint does not contain optimizer state.")
+    payload_args = payload.get("args") or {}
+    if not isinstance(payload_args, dict):
+        raise RuntimeError("Checkpoint args must be a mapping.")
+    optimizer_kind = str(
+        payload.get("optimizer_name", payload_args.get("optimizer", "ivon"))
+    ).lower()
+    optimizer = create_optimizer_from_checkpoint(
+        model, optimizer_kind, payload_args, optimizer_state
+    )
     optimizer.load_state_dict(optimizer_state)
-    move_ivon_optimizer_state_to_device(optimizer)
+    move_optimizer_state_to_device(optimizer, next(model.parameters()).device)
+    current_step = payload.get("dense_optimizer_current_step")
+    if current_step is not None and hasattr(optimizer, "current_step"):
+        optimizer.current_step = int(current_step)
     return optimizer
 
 
@@ -301,34 +328,6 @@ def trim_batch(batch: dict[str, torch.Tensor], limit: int | None) -> dict[str, t
     if limit is None or batch["inputs"].shape[0] <= limit:
         return batch
     return {key: value[:limit] for key, value in batch.items()}
-
-
-@contextmanager
-def sampled_ivon_params(optimizer: IVON, *, posterior_scale: float) -> Any:
-    if posterior_scale < 0:
-        raise ValueError("--ivon-posterior-scale must be non-negative.")
-    if posterior_scale == 0:
-        yield
-        return
-    if posterior_scale == 1:
-        with optimizer.sampled_params(train=False):
-            yield
-        return
-
-    param_avg, noise = optimizer._sample_params()
-    offset = 0
-    try:
-        for group in optimizer.param_groups:
-            for p in group["params"]:
-                if p is None:
-                    continue
-                p_slice = slice(offset, offset + p.numel())
-                p.data = (param_avg[p_slice] + posterior_scale * noise[p_slice]).view(p.shape)
-                offset += p.numel()
-        assert offset == optimizer._numel
-        yield
-    finally:
-        optimizer._restore_param_average(False, param_avg, noise)
 
 
 def run_rollout_current_params(
@@ -354,16 +353,18 @@ def run_rollout_current_params(
     return torch.argmax(logits, dim=-1), q_halt_logits.to(torch.float32)
 
 
-def run_ivon_rollout_once(
+def run_optimizer_rollout_once(
     *,
     inner: torch.nn.Module,
-    optimizer: IVON,
+    optimizer: Optimizer,
     batch: dict[str, torch.Tensor],
     depth: int,
     device: torch.device,
     posterior_scale: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    with sampled_ivon_params(optimizer, posterior_scale=posterior_scale):
+    with optimizer_sampling_context(
+        optimizer, train=False, posterior_scale=posterior_scale
+    ):
         return run_rollout_current_params(inner=inner, batch=batch, depth=depth, device=device)
 
 
@@ -464,11 +465,18 @@ def write_progress_json(
     elapsed_s = time.time() - start_time
     count = max(totals.count, 1)
     token_count = max(totals.token_count, 1)
-    has_posterior_mean_selection = args.method in ("ivon_posterior_mean_q_selection", "ivon_compare_selection")
-    selected_exact = totals.posterior_mean_q_exact if args.method == "ivon_posterior_mean_q_selection" else totals.best_q_exact
+    has_posterior_mean_selection = args.method in (
+        "posterior_mean_q_selection",
+        "compare_selection",
+    )
+    selected_exact = (
+        totals.posterior_mean_q_exact
+        if args.method == "posterior_mean_q_selection"
+        else totals.best_q_exact
+    )
     selected_token_correct = (
         totals.posterior_mean_q_token_correct
-        if args.method == "ivon_posterior_mean_q_selection"
+        if args.method == "posterior_mean_q_selection"
         else totals.best_q_token_correct
     )
     utils.write_json(
@@ -501,7 +509,7 @@ def evaluate(
     *,
     args: argparse.Namespace,
     model: torch.nn.Module,
-    optimizer: IVON,
+    optimizer: Optimizer,
     loader: Iterable[tuple[str, dict[str, torch.Tensor], int]],
     device: torch.device,
     expected_count: int | None,
@@ -535,29 +543,34 @@ def evaluate(
         all_q_scores = []
 
         sample_id = 0
-        while sample_id < args.k:
-            if args.method == "ivon_antithetic_parameter_sampling":
+        sample_count = 1 if args.method == "mean_only" else args.k
+        posterior_scale = (
+            0.0 if args.method == "mean_only" else args.posterior_scale
+        )
+        while sample_id < sample_count:
+            if args.method == "antithetic_parameter_sampling":
+                assert isinstance(optimizer, IVON)
                 rollout_outputs = run_ivon_antithetic_rollout_pair(
                     inner=inner,
                     optimizer=optimizer,
                     batch=batch,
                     depth=args.depth,
                     device=device,
-                    posterior_scale=args.ivon_posterior_scale,
+                    posterior_scale=posterior_scale,
                 )
             else:
                 rollout_outputs = [
-                    run_ivon_rollout_once(
+                    run_optimizer_rollout_once(
                         inner=inner,
                         optimizer=optimizer,
                         batch=batch,
                         depth=args.depth,
                         device=device,
-                        posterior_scale=args.ivon_posterior_scale,
+                        posterior_scale=posterior_scale,
                     )
                 ]
             for pred, q_score in rollout_outputs:
-                if sample_id >= args.k:
+                if sample_id >= sample_count:
                     break
                 preds = pred.unsqueeze(1)
                 q_scores = q_score.unsqueeze(1)
@@ -572,7 +585,10 @@ def evaluate(
                 best_exact = torch.where(better, exact, best_exact)
                 best_token_correct = torch.where(better, token_correct, best_token_correct)
                 pass_exact |= exact
-                if args.method in ("ivon_posterior_mean_q_selection", "ivon_compare_selection"):
+                if args.method in (
+                    "posterior_mean_q_selection",
+                    "compare_selection",
+                ):
                     all_preds.append(pred)
                     all_q_scores.append(q_score)
                 sample_id += 1
@@ -609,11 +625,18 @@ def evaluate(
 def summarize(totals: EvalTotals, elapsed_s: float, args: argparse.Namespace, expected_count: int | None) -> dict[str, Any]:
     count = max(totals.count, 1)
     token_count = max(totals.token_count, 1)
-    has_posterior_mean_selection = args.method in ("ivon_posterior_mean_q_selection", "ivon_compare_selection")
-    selected_exact = totals.posterior_mean_q_exact if args.method == "ivon_posterior_mean_q_selection" else totals.best_q_exact
+    has_posterior_mean_selection = args.method in (
+        "posterior_mean_q_selection",
+        "compare_selection",
+    )
+    selected_exact = (
+        totals.posterior_mean_q_exact
+        if args.method == "posterior_mean_q_selection"
+        else totals.best_q_exact
+    )
     selected_token_correct = (
         totals.posterior_mean_q_token_correct
-        if args.method == "ivon_posterior_mean_q_selection"
+        if args.method == "posterior_mean_q_selection"
         else totals.best_q_token_correct
     )
     return {
@@ -632,12 +655,12 @@ def summarize(totals: EvalTotals, elapsed_s: float, args: argparse.Namespace, ex
         "posterior_mean_q_token_correct": totals.posterior_mean_q_token_correct,
         "elapsed_s": elapsed_s,
         "config": {
-            "checkpoint": str(args.ivon_checkpoint),
+            "checkpoint": str(args.checkpoint),
             "model_state_key": args.model_state_key,
             "k": args.k,
             "depth": args.depth,
             "limit_puzzles": args.limit_puzzles,
-            "ivon_posterior_scale": args.ivon_posterior_scale,
+            "posterior_scale": args.posterior_scale,
         },
         "direct_exact_accuracy": totals.direct_exact / count,
         "direct_token_accuracy": totals.direct_token_correct / token_count,
@@ -657,10 +680,11 @@ def summarize(totals: EvalTotals, elapsed_s: float, args: argparse.Namespace, ex
 
 def main() -> None:
     args = parse_args()
+    args.method = METHOD_ALIASES.get(args.method, args.method)
     if args.k <= 0 or args.depth <= 0:
         raise ValueError("--k and --depth must be positive.")
-    if args.ivon_posterior_scale < 0:
-        raise ValueError("--ivon-posterior-scale must be non-negative.")
+    if args.posterior_scale < 0:
+        raise ValueError("--posterior-scale must be non-negative.")
     if args.num_shards <= 0:
         raise ValueError("--num-shards must be positive.")
     if args.shard_index < 0 or args.shard_index >= args.num_shards:
@@ -687,13 +711,25 @@ def main() -> None:
         )
         expected_count = min(shard_size, args.limit_puzzles) if args.limit_puzzles is not None else shard_size
 
-    raw_payload = torch.load(args.ivon_checkpoint, map_location="cpu", weights_only=False)
+    raw_payload = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     if not isinstance(raw_payload, dict):
-        raise RuntimeError(f"Expected dict checkpoint payload: {args.ivon_checkpoint}")
+        raise RuntimeError(f"Expected dict checkpoint payload: {args.checkpoint}")
     model = create_wrapped_model_from_checkpoint(raw_payload, metadata, args.eval_batch_size, device)
-    optimizer = load_ivon_state(model, raw_payload, args.ivon_checkpoint, args.model_state_key)
+    optimizer = load_optimizer_state(
+        model, raw_payload, args.checkpoint, args.model_state_key
+    )
+    loaded_optimizer_name = optimizer_name(optimizer)
+    if args.method != "mean_only" and not supports_posterior_sampling(optimizer):
+        raise ValueError(
+            f"{loaded_optimizer_name.upper()} checkpoints only support --method mean_only."
+        )
+    if args.method == "antithetic_parameter_sampling" and not isinstance(
+        optimizer, IVON
+    ):
+        raise ValueError("Antithetic parameter sampling is currently IVON-only.")
     totals, elapsed_s = evaluate(args=args, model=model, optimizer=optimizer, loader=loader, device=device, expected_count=expected_count)
     summary = summarize(totals, elapsed_s, args, expected_count)
+    summary["optimizer"] = loaded_optimizer_name
     summary["checkpoint_args"] = raw_payload.get("args", {})
     print(json.dumps(summary, indent=2, sort_keys=True))
     utils.write_json(args.output_json, summary)

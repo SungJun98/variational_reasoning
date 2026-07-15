@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# IVON_CHECKPOINT is required. The evaluator accepts checkpoints produced by
-# either train_scratch.py or train_ft.py.
+# CHECKPOINT is required. IVON_CHECKPOINT remains a compatibility alias.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
@@ -10,14 +9,14 @@ PROJECT_ROOT="${PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 PYTHON="${PYTHON:-python3}"
 TRM_REPO="${TRM_REPO:-${PROJECT_ROOT}/third_party/TinyRecursiveModels}"
 DATASET="${DATASET:-${PROJECT_ROOT}/data/sudoku-extreme-1k-aug-1000}"
-CHECKPOINT="${IVON_CHECKPOINT:-}"
+CHECKPOINT="${CHECKPOINT:-${IVON_CHECKPOINT:-}}"
 
 if [[ -z "${CHECKPOINT}" ]]; then
-  echo "IVON_CHECKPOINT must point to a scratch or fine-tuned IVON checkpoint." >&2
+  echo "CHECKPOINT must point to a scratch or fine-tuned optimizer checkpoint." >&2
   exit 2
 fi
 
-METHOD="${METHOD:-ivon_parameter_sampling}"
+METHOD="${METHOD:-posterior_parameter_sampling}"
 K="${K:-10}"
 DEPTH="${DEPTH:-16}"
 NUM_SHARDS="${NUM_SHARDS:-1}"
@@ -42,7 +41,7 @@ cd "${PROJECT_ROOT}"
 exec "${PYTHON}" -m ptrm.eval \
   --trm-repo "${TRM_REPO}" \
   --dataset "${DATASET}" \
-  --ivon-checkpoint "${CHECKPOINT}" \
+  --checkpoint "${CHECKPOINT}" \
   --model-state-key "${MODEL_STATE_KEY:-model_state_dict}" \
   --method "${METHOD}" \
   --output-json "${OUTPUT_JSON}" \
@@ -52,7 +51,7 @@ exec "${PYTHON}" -m ptrm.eval \
   --eval-batch-size "${EVAL_BATCH_SIZE:-128}" \
   --k "${K}" \
   --depth "${DEPTH}" \
-  --ivon-posterior-scale "${IVON_POSTERIOR_SCALE:-1.0}" \
+  --posterior-scale "${POSTERIOR_SCALE:-${IVON_POSTERIOR_SCALE:-1.0}}" \
   --num-shards "${NUM_SHARDS}" \
   --shard-index "${SHARD_INDEX}" \
   --progress \

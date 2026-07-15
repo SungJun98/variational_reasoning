@@ -14,10 +14,15 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from optim.ivon import IVON
+from optim.factory import (
+    create_dense_optimizer,
+    move_optimizer_state_to_device,
+    optimizer_name,
+    optimizer_sampling_context,
+)
 
 
-EXACT_FORMAT_VERSION = 3
+EXACT_FORMAT_VERSION = 4
 RESUME_ARG_IGNORED_KEYS = {
     "device",
     "output_root",
@@ -237,17 +242,55 @@ def schedule_value(schedule: dict[str, Any], key: str, step: int, default: Any) 
     raise ValueError(f"Unsupported schedule type for {key}: {schedule_type}")
 
 
-def apply_ivon_schedule(dense_optimizer: Any, schedule: dict[str, Any], step: int, defaults: argparse.Namespace) -> dict[str, Any]:
+def apply_optimizer_schedule(
+    dense_optimizer: Any,
+    schedule: dict[str, Any],
+    step: int,
+    defaults: argparse.Namespace,
+) -> dict[str, Any]:
+    name = optimizer_name(dense_optimizer)
     dense_lr = float(schedule_value(schedule, "dense_lr", step, defaults.lr))
-    ivon_ess = float(schedule_value(schedule, "ivon_ess", step, defaults.ivon_ess))
-    hess_approx = str(schedule_value(schedule, "ivon_hess_approx", step, defaults.ivon_hess_approx))
-    if hess_approx not in ("price", "gradsq"):
-        raise ValueError(f"Invalid scheduled ivon_hess_approx: {hess_approx}")
-    dense_optimizer.hess_approx = hess_approx
     for group in dense_optimizer.param_groups:
         group["lr"] = dense_lr
-        group["ess"] = ivon_ess
-    return {"dense_lr": dense_lr, "ivon_ess": ivon_ess, "ivon_hess_approx": hess_approx}
+    values: dict[str, Any] = {"dense_lr": dense_lr, "optimizer": name}
+
+    if name == "ivon":
+        ivon_ess = float(
+            schedule_value(schedule, "ivon_ess", step, defaults.ivon_ess)
+        )
+        hess_approx = str(
+            schedule_value(
+                schedule, "ivon_hess_approx", step, defaults.ivon_hess_approx
+            )
+        )
+        if hess_approx not in ("price", "gradsq"):
+            raise ValueError(f"Invalid scheduled ivon_hess_approx: {hess_approx}")
+        dense_optimizer.hess_approx = hess_approx
+        for group in dense_optimizer.param_groups:
+            group["ess"] = ivon_ess
+        values.update(ivon_ess=ivon_ess, ivon_hess_approx=hess_approx)
+    elif name == "evon":
+        default_ess = (
+            defaults.evon_ess
+            if getattr(defaults, "evon_ess", None) is not None
+            else defaults.ivon_ess
+        )
+        schedule_key = "evon_ess" if "evon_ess" in schedule else "ivon_ess"
+        evon_ess = float(schedule_value(schedule, schedule_key, step, default_ess))
+        for group in dense_optimizer.param_groups:
+            group["ess"] = evon_ess
+        values["evon_ess"] = evon_ess
+    return values
+
+
+def apply_ivon_schedule(
+    dense_optimizer: Any,
+    schedule: dict[str, Any],
+    step: int,
+    defaults: argparse.Namespace,
+) -> dict[str, Any]:
+    """Backward-compatible alias for the optimizer-agnostic scheduler."""
+    return apply_optimizer_schedule(dense_optimizer, schedule, step, defaults)
 
 
 def make_config(args: argparse.Namespace) -> Any:
@@ -310,23 +353,7 @@ def replace_dense_optimizer(train_state: Any, args: argparse.Namespace) -> None:
         for param in group["params"]
         if param is not None
     ]
-    dense_optimizer = IVON(
-        [{"params": [param for _name, param in named_dense_params], "param_names": [name for name, _param in named_dense_params]}],
-        lr=0,
-        ess=args.ivon_ess,
-        hess_init=args.ivon_hess_init,
-        beta1=args.beta1,
-        beta2=args.ivon_beta2,
-        weight_decay=args.ivon_weight_decay,
-        mc_samples=args.ivon_mc_samples,
-        hess_approx=args.ivon_hess_approx,
-        clip_radius=args.ivon_clip_radius,
-        debias=not args.no_ivon_debias,
-        rescale_lr=not args.no_ivon_rescale_lr,
-        update_transform=args.ivon_update_transform,
-        muon_whiten_eps=args.ivon_muon_whiten_eps,
-        muon_ns_steps=args.ivon_muon_ns_steps,
-    )
+    dense_optimizer = create_dense_optimizer(named_dense_params, args)
     if len(train_state.optimizers) == 1:
         train_state.optimizers = [dense_optimizer]
         train_state.optimizer_lrs = [args.lr]
@@ -336,10 +363,10 @@ def replace_dense_optimizer(train_state: Any, args: argparse.Namespace) -> None:
 
 
 def patch_ivon_noise_scale(dense_optimizer: Any, scale: float) -> None:
-    if scale == 1.0:
-        return
     if scale < 0:
         raise ValueError("--ivon-noise-scale must be non-negative.")
+    if optimizer_name(dense_optimizer) != "ivon" or scale == 1.0:
+        return
 
     def scaled_sample_params() -> tuple[torch.Tensor, torch.Tensor]:
         noise_samples = []
@@ -478,7 +505,7 @@ def forward_loss(
     return (*result, act_mode, loss_mode)
 
 
-def train_ivon_batch(
+def train_optimizer_batch(
     config: Any,
     train_state: Any,
     batch: Any,
@@ -501,9 +528,6 @@ def train_ivon_batch(
 
     dense_optimizer = train_state.optimizers[-1]
     sparse_optimizer = train_state.optimizers[0] if len(train_state.optimizers) > 1 else None
-    if not isinstance(dense_optimizer, IVON):
-        raise TypeError("Dense optimizer must be optim.ivon.IVON.")
-
     if sparse_optimizer is not None:
         sparse_default = compute_lr(args.puzzle_emb_lr, config, train_state)
         sparse_lr = float(schedule_value(schedule, "puzzle_emb_lr", train_state.step, sparse_default))
@@ -512,7 +536,10 @@ def train_ivon_batch(
     else:
         sparse_lr = None
 
-    scheduled_values = apply_ivon_schedule(dense_optimizer, schedule, train_state.step, args)
+    scheduled_values = apply_optimizer_schedule(
+        dense_optimizer, schedule, train_state.step, args
+    )
+    dense_optimizer_name = optimizer_name(dense_optimizer)
     metrics_out: dict[str, float] | None = None
 
     def closure() -> Any:
@@ -520,7 +547,7 @@ def train_ivon_batch(
         dense_optimizer.zero_grad()
         if sparse_optimizer is not None:
             sparse_optimizer.zero_grad()
-        with dense_optimizer.sampled_params(train=True):
+        with optimizer_sampling_context(dense_optimizer, train=True):
             train_state.carry, loss, raw_metrics, _outputs, _halted, act_mode, loss_mode = forward_loss(
                 train_state,
                 batch,
@@ -534,17 +561,39 @@ def train_ivon_batch(
                     for key, value in raw_metrics.items()
                 }
                 metrics_out["train/lr"] = float(scheduled_values["dense_lr"])
-                metrics_out["train/puzzle_emb_lr"] = sparse_lr
-                metrics_out["train/ivon_ess"] = float(scheduled_values["ivon_ess"])
-                metrics_out["train/ivon_hess_approx_id"] = 1.0 if scheduled_values["ivon_hess_approx"] == "price" else 2.0
+                if sparse_lr is not None:
+                    metrics_out["train/puzzle_emb_lr"] = sparse_lr
+                metrics_out["diag/optimizer_id"] = {
+                    "ivon": 1.0,
+                    "soap": 2.0,
+                    "evon": 3.0,
+                }[dense_optimizer_name]
+                if dense_optimizer_name == "ivon":
+                    metrics_out["train/ivon_ess"] = float(
+                        scheduled_values["ivon_ess"]
+                    )
+                    metrics_out["train/ivon_hess_approx_id"] = (
+                        1.0
+                        if scheduled_values["ivon_hess_approx"] == "price"
+                        else 2.0
+                    )
+                elif dense_optimizer_name == "evon":
+                    metrics_out["train/evon_ess"] = float(
+                        scheduled_values["evon_ess"]
+                    )
                 metrics_out["diag/carry_mode_id"] = 1.0 if args.carry_mode == "persistent" else 2.0
-                metrics_out["diag/ivon_noise_scale"] = float(args.ivon_noise_scale)
-                metrics_out["diag/ivon_update_transform_id"] = {
-                    "clip": 1.0,
-                    "none": 2.0,
-                    "muon_whiten": 3.0,
-                }[args.ivon_update_transform]
-                metrics_out["diag/ivon_muon_ns_steps"] = float(args.ivon_muon_ns_steps)
+                if dense_optimizer_name == "ivon":
+                    metrics_out["diag/ivon_noise_scale"] = float(
+                        args.ivon_noise_scale
+                    )
+                    metrics_out["diag/ivon_update_transform_id"] = {
+                        "clip": 1.0,
+                        "none": 2.0,
+                        "muon_whiten": 3.0,
+                    }[args.ivon_update_transform]
+                    metrics_out["diag/ivon_muon_ns_steps"] = float(
+                        args.ivon_muon_ns_steps
+                    )
                 metrics_out["diag/requested_act_mode_id"] = mode_id(args.act_mode)
                 metrics_out["diag/effective_act_mode_id"] = mode_id(act_mode)
                 metrics_out["diag/requested_loss_mode_id"] = mode_id(args.loss_mode)
@@ -559,6 +608,20 @@ def train_ivon_batch(
         sparse_optimizer.step()
         sparse_optimizer.zero_grad()
     return metrics_out
+
+
+def train_ivon_batch(
+    config: Any,
+    train_state: Any,
+    batch: Any,
+    global_batch_size: int,
+    args: argparse.Namespace,
+    schedule: dict[str, Any],
+) -> dict[str, float] | None:
+    """Backward-compatible alias for older launch code."""
+    return train_optimizer_batch(
+        config, train_state, batch, global_batch_size, args, schedule
+    )
 
 
 def capture_rng_state() -> dict[str, Any]:
@@ -605,14 +668,23 @@ def exact_resume_args(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def validate_resume_metadata(checkpoint: dict[str, Any], args: argparse.Namespace, schedule: dict[str, Any]) -> None:
-    if int(checkpoint.get("exact_format_version", -1)) != EXACT_FORMAT_VERSION:
+    format_version = int(checkpoint.get("exact_format_version", -1))
+    if format_version not in (3, EXACT_FORMAT_VERSION):
         raise ValueError(f"Unsupported exact checkpoint format: {checkpoint.get('exact_format_version')}")
     checkpoint_args = checkpoint.get("args_for_resume")
     if not isinstance(checkpoint_args, dict):
         raise ValueError("Exact checkpoint is missing args_for_resume metadata.")
     checkpoint_args = dict(checkpoint_args)
     checkpoint_args.setdefault("train_group_count_for_epochs", 1000)
-    if comparable_resume_args(checkpoint_args) != exact_resume_args(args):
+    current_args = exact_resume_args(args)
+    if format_version == 3:
+        if getattr(args, "optimizer", "ivon") != "ivon":
+            raise ValueError("Version 3 exact checkpoints can only resume with IVON.")
+        checkpoint_args.setdefault("optimizer", "ivon")
+        for key, value in current_args.items():
+            if key.startswith(("soap_", "evon_")):
+                checkpoint_args.setdefault(key, value)
+    if comparable_resume_args(checkpoint_args) != current_args:
         raise ValueError("Resume args do not match exact checkpoint args_for_resume.")
     if checkpoint.get("schedule") != schedule:
         raise ValueError("Resume schedule does not match exact checkpoint schedule.")
@@ -623,12 +695,15 @@ def save_public_checkpoint(train_state: Any, args: argparse.Namespace, run_root:
     path.parent.mkdir(parents=True, exist_ok=True)
     dense_optimizer = train_state.optimizers[-1]
     sparse_optimizer = train_state.optimizers[0] if len(train_state.optimizers) > 1 else None
+    dense_optimizer_state = dense_optimizer.state_dict()
     payload = {
-        "name": "ptrm_ivon_public",
+        "name": "ptrm_optimizer_public",
         "args": serializable_args(args),
         "step": train_state.step,
         "model_state_dict": train_state.model.state_dict(),
-        "dense_optimizer_state_dict": dense_optimizer.state_dict(),
+        "optimizer_name": optimizer_name(dense_optimizer),
+        "optimizer_state_dict": dense_optimizer_state,
+        "dense_optimizer_state_dict": dense_optimizer_state,
         "dense_optimizer_current_step": getattr(dense_optimizer, "current_step", None),
         "sparse_optimizer_state_dict": sparse_optimizer.state_dict() if sparse_optimizer is not None else None,
     }
@@ -655,8 +730,9 @@ def save_exact_checkpoint(
     path.parent.mkdir(parents=True, exist_ok=True)
     dense_optimizer = train_state.optimizers[-1]
     sparse_optimizer = train_state.optimizers[0] if len(train_state.optimizers) > 1 else None
+    dense_optimizer_state = dense_optimizer.state_dict()
     payload = {
-        "name": "ptrm_ivon_exact",
+        "name": "ptrm_optimizer_exact",
         "exact_format_version": EXACT_FORMAT_VERSION,
         "args": serializable_args(args),
         "args_for_resume": exact_resume_args(args),
@@ -664,7 +740,9 @@ def save_exact_checkpoint(
         "step": train_state.step,
         "total_steps": train_state.total_steps,
         "model_state_dict": train_state.model.state_dict(),
-        "dense_optimizer_state_dict": dense_optimizer.state_dict(),
+        "optimizer_name": optimizer_name(dense_optimizer),
+        "optimizer_state_dict": dense_optimizer_state,
+        "dense_optimizer_state_dict": dense_optimizer_state,
         "dense_optimizer_current_step": getattr(dense_optimizer, "current_step", None),
         "sparse_optimizer_state_dict": sparse_optimizer.state_dict() if sparse_optimizer is not None else None,
         "carry": train_state.carry,
@@ -693,8 +771,25 @@ def restore_exact_checkpoint(
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     validate_resume_metadata(checkpoint, args, schedule)
     train_state.model.load_state_dict(checkpoint["model_state_dict"], strict=True)
-    train_state.optimizers[-1].load_state_dict(checkpoint["dense_optimizer_state_dict"])
-    train_state.optimizers[-1].current_step = int(checkpoint["dense_optimizer_current_step"])
+    dense_optimizer = train_state.optimizers[-1]
+    saved_optimizer_name = checkpoint.get(
+        "optimizer_name", (checkpoint.get("args") or {}).get("optimizer", "ivon")
+    )
+    if saved_optimizer_name != optimizer_name(dense_optimizer):
+        raise ValueError(
+            f"Checkpoint optimizer {saved_optimizer_name!r} does not match "
+            f"requested optimizer {optimizer_name(dense_optimizer)!r}."
+        )
+    optimizer_state = checkpoint.get(
+        "optimizer_state_dict", checkpoint.get("dense_optimizer_state_dict")
+    )
+    if not isinstance(optimizer_state, dict):
+        raise ValueError("Exact checkpoint is missing optimizer state.")
+    dense_optimizer.load_state_dict(optimizer_state)
+    move_optimizer_state_to_device(dense_optimizer, device)
+    current_step = checkpoint.get("dense_optimizer_current_step")
+    if current_step is not None and hasattr(dense_optimizer, "current_step"):
+        dense_optimizer.current_step = int(current_step)
     sparse_state = checkpoint.get("sparse_optimizer_state_dict")
     if sparse_state is not None and len(train_state.optimizers) > 1:
         train_state.optimizers[0].load_state_dict(sparse_state)
