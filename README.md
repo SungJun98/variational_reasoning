@@ -13,9 +13,9 @@ Use Python with CUDA-enabled PyTorch, then install the runtime dependencies:
 pip install -r requirements.txt
 ```
 
-EVON is pinned to the reviewed upstream commit. SOAP is included in
-`optim/soap.py`; attribution and dependency licenses are recorded in
-`THIRD_PARTY_NOTICES.md`.
+EVON is pinned to the reviewed upstream commit and remains subject to its
+upstream GPLv3+ license. SOAP is included in `optim/soap.py`, whose module
+header contains the upstream attribution and MIT license notice.
 
 The launch scripts expect this directory layout by default:
 
