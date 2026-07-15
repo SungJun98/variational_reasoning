@@ -1,6 +1,7 @@
 # Variational Reasoning
 
-Minimal code for training and evaluating a PTRM/TRM model from scratch with IVON.
+Minimal code for training a PTRM/TRM model from scratch or fine-tuning a
+compatible checkpoint with IVON, followed by posterior-sampling evaluation.
 
 ## Setup
 
@@ -63,7 +64,7 @@ Subset results in the CSV are diagnostic measurements and should not be treated 
 The full-evaluation row was stopped after `22.8%` of the test set, so it must not be compared as if it were a completed full evaluation.
 Regenerate the CSV before sharing newer results because the listed running experiments may have advanced beyond this snapshot.
 
-## Train
+## Train From Scratch
 
 Run from the repository root:
 
@@ -87,6 +88,51 @@ Additional training options can be appended directly:
 
 The default learning-rate schedule is in `ptrm/configs/ivon_scratch_schedule.json`.
 
+## Fine-Tune a Checkpoint
+
+Fine-tuning uses the same model, IVON optimizer, exact-resume checkpoint format,
+and evaluator as from-scratch training. A compatible pretrained PTRM/TRM
+checkpoint is required and is not bundled with this repository.
+
+The base checkpoint may be either a raw model state dictionary or a checkpoint
+dictionary containing `model_state_dict`. Use `BASE_STATE_KEY` when the weights
+are stored under another key, such as `ema_model_state_dict`. The model
+architecture options passed to `train_ft.py` must match the base checkpoint.
+
+Run the reference fine-tuning configuration from the repository root:
+
+```bash
+BASE_CHECKPOINT=/path/to/base-checkpoint.pt \
+  ./ptrm/scripts/run_ivon_ft_train.sh
+```
+
+Common settings can be changed with environment variables:
+
+```bash
+BASE_CHECKPOINT=/path/to/base-checkpoint.pt \
+RUN_NAME=my_ft_run CUDA_VISIBLE_DEVICES=1 TRAIN_STEPS=500 \
+  ./ptrm/scripts/run_ivon_ft_train.sh
+```
+
+Additional non-scheduled options can be appended directly. Options appended to
+the command take precedence over launcher defaults:
+
+```bash
+BASE_CHECKPOINT=/path/to/base-checkpoint.pt \
+  ./ptrm/scripts/run_ivon_ft_train.sh \
+  --ivon-noise-scale 0.8 --ivon-hess-init 4.0
+```
+
+The tracked reference schedule is in `ptrm/configs/ivon_ft_schedule.json`. Its
+main defaults are 200 optimizer steps, dense LR `1e-4`, puzzle-embedding LR
+`1e-2`, ESS `3e5`, Hessian initialization `3.0`, IVON beta2 `0.99999`, IVON
+weight decay `0.225`, and no finite clipping radius. Outputs are written to
+`outputs/ivon_ft/<run-name>/` by default.
+
+The schedule controls dense LR, puzzle-embedding LR, ESS, and the Hessian
+approximation at every optimizer step. To override one of those values, copy
+the schedule JSON, edit it, and pass its path through `SCHEDULE_JSON`.
+
 ### Weights & Biases
 
 W&B logging is disabled by default. Enable it explicitly when needed:
@@ -100,25 +146,30 @@ Set `WANDB_ENTITY` only when an entity is required.
 
 ## Evaluate
 
-The evaluation script uses the final checkpoint from the selected run:
+The generic evaluator accepts final checkpoints produced by either training
+entrypoint:
 
 ```bash
-RUN_NAME=my_run \
-  ./ptrm/scripts/run_ivon_scratch_eval.sh
+IVON_CHECKPOINT=outputs/ivon_ft/my_ft_run/checkpoints/checkpoint.pt \
+  ./ptrm/scripts/run_ivon_eval.sh
 ```
 
 Example with posterior comparison and 20 samples:
 
 ```bash
-RUN_NAME=my_run METHOD=ivon_compare_selection K=20 \
-  ./ptrm/scripts/run_ivon_scratch_eval.sh
+IVON_CHECKPOINT=outputs/ivon_scratch/my_run/checkpoints/checkpoint.pt \
+METHOD=ivon_compare_selection K=20 \
+  ./ptrm/scripts/run_ivon_eval.sh
 ```
 
-Use `IVON_CHECKPOINT=/path/to/checkpoint.pt` to evaluate a different checkpoint. Training outputs are written to `outputs/ivon_scratch/<run-name>/` by default.
+`run_ivon_scratch_eval.sh` remains available as a compatibility wrapper that
+selects `outputs/ivon_scratch/<run-name>/checkpoints/checkpoint.pt` from
+`RUN_NAME`.
 
 For all available arguments:
 
 ```bash
 python3 -m ptrm.train_scratch --help
+python3 -m ptrm.train_ft --help
 python3 -m ptrm.eval --help
 ```

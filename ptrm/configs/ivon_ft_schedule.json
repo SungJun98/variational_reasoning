@@ -1,0 +1,6 @@
+{
+  "dense_lr": {"type": "constant", "value": 0.0001},
+  "puzzle_emb_lr": {"type": "constant", "value": 0.01},
+  "ivon_ess": {"type": "constant", "value": 300000.0},
+  "ivon_hess_approx": {"type": "constant", "value": "price"}
+}
