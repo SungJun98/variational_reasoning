@@ -1,7 +1,4 @@
-# Variational Reasoning
-
-This repository contains the code used for the Sudoku-Extreme and Maze-Hard
-results in Table 1. This release does not cover ARC-AGI-2.
+# Posterior-decision Reasoning
 
 ## Code layout
 
@@ -19,12 +16,7 @@ variational_reasoning/
     └── sh/                    # Table 1 launchers
 ```
 
-The FPRM implementation follows
-[`nilskiKonjIzDunava/fprm`](https://github.com/nilskiKonjIzDunava/fprm) at
-commit `4fd7ab116b1361c4fb040b26b270f19a3d5319b4`. The TRM and PTRM code follows
-[`SamsungSAILMontreal/TinyRecursiveModels`](https://github.com/SamsungSAILMontreal/TinyRecursiveModels)
-at commit `c01103738605ba39d1430519b1ee0c62f4c707f8`. The corresponding source files
-retain their upstream license notices.
+The FPRM implementation follows [`nilskiKonjIzDunava/fprm`](https://github.com/nilskiKonjIzDunava/fprm). The TRM and PTRM code follows [`SamsungSAILMontreal/TinyRecursiveModels`](https://github.com/SamsungSAILMontreal/TinyRecursiveModels).
 
 ## Installation
 
@@ -35,16 +27,14 @@ pip install -r requirements.txt
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
-Each launcher reads a preprocessed dataset directory from `DATASET`. Evaluation
-checkpoints come from `CHECKPOINT`. FPRM checkpoints require the released
-`all_config.yaml` in the same directory as the checkpoint. Download public FPRM
-files from [`fixed-point-reasoners/fprm`](https://huggingface.co/fixed-point-reasoners/fprm).
+Each launcher reads a preprocessed dataset directory from `DATASET`.
+Evaluation checkpoints come from `CHECKPOINT`. FPRM checkpoints require the released `all_config.yaml` in the same directory as the checkpoint.
+Download public FPRM files from [`fixed-point-reasoners/fprm`](https://huggingface.co/fixed-point-reasoners/fprm).
 
 ## Table 1 launchers
 
-Each task directory contains launchers for the six code-evaluated methods in
-this release. The HRM values in Table 1 are paper-reported, so this repository
-does not provide an HRM launcher.
+Each task directory contains launchers for the six code-evaluated methods in this release.
+The HRM values in Table 1 are paper-reported, so this repository does not provide an HRM launcher.
 
 | Method | Maze-Hard | Sudoku-Extreme |
 | --- | --- | --- |
@@ -55,8 +45,7 @@ does not provide an HRM launcher.
 | W-PTRM | `rrm/sh/maze_hard/w_ptrm.sh` | `rrm/sh/sudoku_extreme/w_ptrm.sh` |
 | FB | `rrm/sh/maze_hard/fb.sh` | `rrm/sh/sudoku_extreme/fb.sh` |
 
-Use `rrm/sh/maze_hard/fb_fprm.sh` for the Maze-Hard FPRM-backbone FB
-experiment.
+Use `rrm/sh/maze_hard/fb_fprm.sh` for the Maze-Hard FPRM-backbone FB experiment.
 
 Run an evaluation with a trained checkpoint:
 
@@ -68,9 +57,9 @@ DEVICE=cuda:0 \
 bash rrm/sh/maze_hard/fb.sh
 ```
 
-`GRAM`, `FB`, and `FB-FPRM` train before evaluation when `CHECKPOINT` is
-unset. Maze-Hard GRAM and both FB backbones read their initialization from
-`BASE_CHECKPOINT`. Sudoku-Extreme GRAM trains from scratch.
+`GRAM`, `FB`, and `FB-FPRM` train before evaluation when `CHECKPOINT` is unset.
+Maze-Hard GRAM and both FB backbones read their initialization from `BASE_CHECKPOINT`.
+Sudoku-Extreme GRAM trains from scratch.
 
 ```bash
 DATASET=/path/to/sudoku-extreme \
@@ -80,17 +69,13 @@ DEVICE=cuda:0 \
 bash rrm/sh/sudoku_extreme/fb.sh
 ```
 
-`fb_fprm.sh` uses eight training processes by default. Set `NPROC_PER_NODE` to
-change that count.
+`fb_fprm.sh` uses eight training processes by default.
+Set `NPROC_PER_NODE` to change that count.
 
-The sharded launchers process shards in sequence on `DEVICE`. They preserve the
-paper's shard boundaries and sampling resets without managing several GPU
-processes in shell. Single runs write `evaluation/metrics.json`. Sharded runs
-write `evaluation/aggregate/metrics.json`.
+The sharded launchers process shards in sequence on `DEVICE`.
+They preserve the paper's shard boundaries and sampling resets without managing several GPU processes in shell.
+Single runs write `evaluation/metrics.json`.
+Sharded runs write `evaluation/aggregate/metrics.json`.
 
-The W-PTRM launchers preserve the parameter-perturbation settings from the
-deprecated W-PTRM runs. They remain runnable for comparison, but the launchers
-do not require their output to equal the reported values.
 
-No launcher compares its metrics with hard-coded paper counts. Each run records
-the measured selected accuracy and Pass@K in its output directory.
+Each run records the measured selected accuracy and Pass@K in its output directory.
