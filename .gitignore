@@ -3,11 +3,14 @@ __pycache__/
 
 .env
 .venv/
+.worktrees/
 wandb/
 
 data/
 outputs/
 third_party/
+tests/
+tests/*
 
 *.pt
 *.pth
