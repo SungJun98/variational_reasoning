@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import hashlib
 from dataclasses import replace
+import os
 from pathlib import Path
+import subprocess
 
 import numpy as np
 import pytest
@@ -478,6 +480,20 @@ def test_arc_config_rejects_nonempty_output_directory(tmp_path: Path) -> None:
         arc.config_from_args(args, world_size=8)
 
 
+def test_arc_config_nonprimary_rank_ignores_primary_output_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "resolved_config.json").write_text("{}\n", encoding="utf-8")
+    args = arc.build_parser().parse_args(_arc_cli_argv(tmp_path))
+    monkeypatch.setenv("RANK", "1")
+
+    config = arc.config_from_args(args, world_size=8)
+
+    assert config.output == output.resolve()
+
+
 def _partition_dataset(tmp_path: Path) -> ArcDataset:
     inputs = np.zeros((10, 900), dtype=np.int32)
     inputs[:, 0] = np.arange(10)
@@ -788,3 +804,93 @@ def test_run_arc_evaluation_reuses_one_w_ptrm_bank_across_batches(
     assert torch.equal(adapter.parameter_vectors[1], adapter.parameter_vectors[3])
     assert not torch.equal(adapter.parameter_vectors[0], adapter.parameter_vectors[1])
     assert torch.equal(_parameter_vector(model), original)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "task", "method_flag", "scale", "global_batch_size"),
+    (
+        ("agi-1/ptrm.sh", "arc-agi-1", "--latent-noise-scale", "0.2", "32"),
+        (
+            "agi-1/w_ptrm.sh",
+            "arc-agi-1",
+            "--parameter-perturbation-scale",
+            "0.3",
+            "768",
+        ),
+        ("agi-2/ptrm.sh", "arc-agi-2", "--latent-noise-scale", "0.2", "32"),
+        (
+            "agi-2/w_ptrm.sh",
+            "arc-agi-2",
+            "--parameter-perturbation-scale",
+            "0.3",
+            "768",
+        ),
+    ),
+)
+def test_arc_experiment_script_builds_the_distributed_command(
+    tmp_path: Path,
+    relative_path: str,
+    task: str,
+    method_flag: str,
+    scale: str,
+    global_batch_size: str,
+) -> None:
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.touch()
+    config = tmp_path / "all_config.yaml"
+    config.touch()
+    capture = tmp_path / "arguments.txt"
+    fake_python = tmp_path / "python"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "CUDA=%s\\n" "${CUDA_VISIBLE_DEVICES-}" > "${CAPTURE_PATH:?}"\n'
+        'printf "%s\\n" "$@" >> "${CAPTURE_PATH}"\n',
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    output = tmp_path / "output"
+    script = Path(__file__).parents[1] / "rrm" / "sh" / relative_path
+    environment = {
+        **os.environ,
+        "DATASET": str(dataset),
+        "CHECKPOINT": str(checkpoint),
+        "CONFIG": str(config),
+        "OUTPUT_DIR": str(output),
+        "PYTHON_BIN": str(fake_python),
+        "DEVICE": "cpu",
+        "GPU_IDS": "2,3",
+        "NPROC_PER_NODE": "2",
+        "CAPTURE_PATH": str(capture),
+    }
+
+    subprocess.run(["bash", str(script)], env=environment, check=True)
+
+    lines = capture.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "CUDA=2,3"
+    arguments = lines[1:]
+    assert arguments[:6] == [
+        "-m",
+        "torch.distributed.run",
+        "--standalone",
+        "--nproc-per-node=2",
+        "--module",
+        "rrm.arc",
+    ]
+    expected_pairs = {
+        "--task": task,
+        "--checkpoint": str(checkpoint),
+        "--config": str(config),
+        "--dataset": str(dataset),
+        "--output": str(output),
+        "--candidate-count": "25",
+        "--depth": "16",
+        "--global-batch-size": global_batch_size,
+        "--seed": "0",
+        "--device": "cpu",
+        method_flag: scale,
+    }
+    for flag, value in expected_pairs.items():
+        index = arguments.index(flag)
+        assert arguments[index + 1] == value

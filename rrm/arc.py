@@ -150,6 +150,9 @@ def config_from_args(
         world_size = int(os.environ.get("WORLD_SIZE", "1"))
     if world_size < 1:
         raise ValueError("world size must be positive")
+    rank = int(os.environ.get("RANK", "0"))
+    if not 0 <= rank < world_size:
+        raise ValueError("rank must be in [0, world size)")
     if isinstance(args.candidate_count, bool) or args.candidate_count < 1:
         raise ValueError("candidate count must be positive")
     if isinstance(args.depth, bool) or args.depth < 1:
@@ -187,7 +190,7 @@ def config_from_args(
     if not config_path.is_file():
         raise FileNotFoundError(f"ARC model config is not a file: {config_path}")
     output = args.output.expanduser().resolve(strict=False)
-    if output.exists() and (not output.is_dir() or any(output.iterdir())):
+    if rank == 0 and output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise FileExistsError(f"Refusing to overwrite non-empty output: {output}")
     return ArcEvaluationConfig(
         task=str(args.task),
