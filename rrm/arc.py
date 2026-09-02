@@ -333,6 +333,8 @@ def load_arc_model(
         np.ndarray,
         np.dtype,
         type(np.dtype(np.uint32)),
+        ptrm.TinyRecursiveReasoningModel_ACTV1Carry,
+        ptrm.TinyRecursiveReasoningModel_ACTV1InnerCarry,
     )
     with torch.serialization.safe_globals(numpy_safe_globals):
         payload = torch.load(
@@ -677,6 +679,29 @@ def _validate_token_array(name: str, values: np.ndarray, *, vocab_size: int) -> 
             raise ValueError(f"ARC {name} tokens must be in [0, {vocab_size - 1}]")
 
 
+def _validate_test_puzzles(test_puzzles: Mapping[str, Any]) -> None:
+    for task_name, puzzle in test_puzzles.items():
+        if not isinstance(task_name, str) or not isinstance(puzzle, Mapping):
+            raise ValueError("ARC test pair sidecar must map task names to objects")
+        test_pairs = puzzle.get("test")
+        if not isinstance(test_pairs, list) or not test_pairs:
+            raise ValueError(f"ARC task {task_name!r} must contain a test pair")
+        for pair in test_pairs:
+            if (
+                not isinstance(pair, Mapping)
+                or "input" not in pair
+                or "output" not in pair
+            ):
+                raise ValueError(f"ARC task {task_name!r} has a malformed test pair")
+            try:
+                _arc_grid(pair["input"])
+                _arc_grid(pair["output"])
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    f"ARC task {task_name!r} has a malformed test pair"
+                ) from error
+
+
 def load_arc_dataset(path: Path) -> ArcDataset:
     """Load and validate one official-format preprocessed ARC test split."""
 
@@ -757,6 +782,7 @@ def load_arc_dataset(path: Path) -> ArcDataset:
     test_puzzles = json.loads(test_puzzles_path.read_text(encoding="utf-8"))
     if not isinstance(test_puzzles, Mapping) or not test_puzzles:
         raise ValueError("ARC test_puzzles.json must contain a non-empty task object")
+    _validate_test_puzzles(test_puzzles)
     identifier_tasks = {
         inverse_augmentation(identifier_payload[int(identifier_id)])[0]
         for identifier_id in np.unique(identifier_values)

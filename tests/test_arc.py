@@ -198,6 +198,27 @@ def test_load_arc_dataset_rejects_identifier_task_outside_sidecar(
         load_arc_dataset(root)
 
 
+@pytest.mark.parametrize(
+    "test_pairs",
+    (
+        [],
+        [{"input": [[0]]}],
+        [{"input": [[0]], "output": [[10]]}],
+    ),
+)
+def test_load_arc_dataset_rejects_malformed_test_puzzle_sidecar(
+    tmp_path: Path, test_pairs: list[dict[str, object]]
+) -> None:
+    root = _write_arc_dataset(tmp_path / "arc")
+    (root / "test_puzzles.json").write_text(
+        json.dumps({"task": {"train": [], "test": test_pairs}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="test pair"):
+        load_arc_dataset(root)
+
+
 def _encoded_grid(grid: list[list[int]]) -> np.ndarray:
     source = np.asarray(grid, dtype=np.uint8)
     encoded = np.zeros((30, 30), dtype=np.uint8)
@@ -694,14 +715,43 @@ def test_load_arc_model_strict_loads_released_and_rrm_checkpoint_shapes(
         assert torch.equal(loaded.state_dict()[name], value)
 
     rrm_checkpoint = tmp_path / "rrm_checkpoint.pt"
-    torch.save(
+    carry = source.initial_carry(
         {
-            "format": "RRM_CHECKPOINT_V1",
-            "model_state": released_state,
-            "rng_state": {"numpy": np.random.get_state()},
-        },
-        rrm_checkpoint,
+            "inputs": torch.zeros((1, 900), dtype=torch.int32),
+            "labels": torch.zeros((1, 900), dtype=torch.int32),
+            "puzzle_identifiers": torch.zeros(1, dtype=torch.int32),
+        }
     )
+    from rrm.train import TrainConfig, build_checkpoint
+
+    training_config = TrainConfig(
+        model="ptrm",
+        task="arc-agi-1",  # type: ignore[arg-type]
+        preset="paper",
+        fb=False,
+        seed=0,
+        dataset=tmp_path,
+        checkpoint=None,
+        output=tmp_path,
+        max_updates=0,
+        device="cpu",
+    )
+    rrm_payload = build_checkpoint(
+        config=training_config,
+        step=0,
+        model=source,
+        optimizer=torch.optim.AdamW(source.parameters()),
+        tracker=None,
+        resolved_config={},
+        source_checkpoint_sha256=None,
+        adapter_state={
+            "carry": carry,
+            "stream": {"iteration": 0},
+            "sparse_optimizer": None,
+            "ema_model_state": None,
+        },
+    )
+    torch.save(rrm_payload, rrm_checkpoint)
     wrapped = arc.load_arc_model(
         replace(config, checkpoint=rrm_checkpoint),
         dataset,
