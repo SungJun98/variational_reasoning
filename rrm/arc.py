@@ -328,11 +328,18 @@ def load_arc_model(
         saved_config.get("arch"), Mapping
     ):
         raise ValueError("ARC all_config.yaml must contain an arch object")
-    payload = torch.load(
-        config.checkpoint,
-        map_location=device,
-        weights_only=True,
+    numpy_safe_globals = (
+        np.core.multiarray._reconstruct,
+        np.ndarray,
+        np.dtype,
+        type(np.dtype(np.uint32)),
     )
+    with torch.serialization.safe_globals(numpy_safe_globals):
+        payload = torch.load(
+            config.checkpoint,
+            map_location=device,
+            weights_only=True,
+        )
     state = _checkpoint_state(payload)
     validate_checkpoint_identifier_rows(
         state, expected_rows=dataset.metadata.num_puzzle_identifiers
@@ -629,6 +636,8 @@ def _load_metadata(path: Path) -> tuple[ArcDatasetMetadata, Mapping[str, Any]]:
         raise ValueError(
             "ARC metadata requires seq_len=900, vocab_size=12, and positive identifiers"
         )
+    if (pad_id, ignore_label_id, blank_identifier_id) != (0, 0, 0):
+        raise ValueError("ARC metadata special token IDs must all be zero")
     return (
         ArcDatasetMetadata(
             pad_id=pad_id,
@@ -656,6 +665,16 @@ def _validate_boundaries(name: str, values: np.ndarray, *, expected_stop: int) -
         raise ValueError(
             f"ARC {name} must be strictly increasing boundaries from 0 to {expected_stop}"
         )
+
+
+def _validate_token_array(name: str, values: np.ndarray, *, vocab_size: int) -> None:
+    if not np.issubdtype(values.dtype, np.integer):
+        raise ValueError(f"ARC {name} tokens must use an integer dtype")
+    chunk_rows = 4096
+    for start in range(0, int(values.shape[0]), chunk_rows):
+        chunk = np.asarray(values[start : start + chunk_rows])
+        if int(chunk.min()) < 0 or int(chunk.max()) >= vocab_size:
+            raise ValueError(f"ARC {name} tokens must be in [0, {vocab_size - 1}]")
 
 
 def load_arc_dataset(path: Path) -> ArcDataset:
@@ -704,10 +723,19 @@ def load_arc_dataset(path: Path) -> ArcDataset:
         )
     if labels.shape != inputs.shape:
         raise ValueError("ARC labels must match the input array shape")
+    _validate_token_array("inputs", inputs, vocab_size=metadata.vocab_size)
+    _validate_token_array("labels", labels, vocab_size=metadata.vocab_size)
     _validate_boundaries(
         "puzzle_indices", puzzle_indices, expected_stop=int(inputs.shape[0])
     )
     puzzle_count = int(puzzle_indices.size - 1)
+    total_puzzles = raw_metadata.get("total_puzzles")
+    if (
+        isinstance(total_puzzles, bool)
+        or not isinstance(total_puzzles, int)
+        or total_puzzles != puzzle_count
+    ):
+        raise ValueError("ARC metadata total_puzzles differs from puzzle boundaries")
     if puzzle_identifiers.shape != (puzzle_count,) or not np.issubdtype(
         puzzle_identifiers.dtype, np.integer
     ):
@@ -729,6 +757,14 @@ def load_arc_dataset(path: Path) -> ArcDataset:
     test_puzzles = json.loads(test_puzzles_path.read_text(encoding="utf-8"))
     if not isinstance(test_puzzles, Mapping) or not test_puzzles:
         raise ValueError("ARC test_puzzles.json must contain a non-empty task object")
+    identifier_tasks = {
+        inverse_augmentation(identifier_payload[int(identifier_id)])[0]
+        for identifier_id in np.unique(identifier_values)
+    }
+    if identifier_tasks != set(test_puzzles):
+        raise ValueError(
+            "ARC identifier tasks differ from the test_puzzles.json sidecar"
+        )
     total_groups = raw_metadata.get("total_groups")
     if isinstance(total_groups, bool) or not isinstance(total_groups, int):
         raise ValueError("ARC metadata 'total_groups' must be an integer")
@@ -773,8 +809,18 @@ def _write_rank_predictions(
     path = output / "rank_predictions" / f"rank_{rank}_predictions.pkl"
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    payload = [
+        {
+            "task_name": prediction.task_name,
+            "input_hash": prediction.input_hash,
+            "grid": prediction.grid,
+            "q_logit": prediction.q_logit,
+            "row_index": prediction.row_index,
+        }
+        for prediction in predictions
+    ]
     with temporary.open("wb") as handle:
-        pickle.dump(list(predictions), handle, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
     temporary.replace(path)
     return path
 
@@ -785,11 +831,41 @@ def _load_rank_predictions(output: Path, *, world_size: int) -> list[ArcPredicti
         path = output / "rank_predictions" / f"rank_{rank}_predictions.pkl"
         with path.open("rb") as handle:
             payload = pickle.load(handle)
-        if not isinstance(payload, list) or not all(
-            isinstance(value, ArcPrediction) for value in payload
-        ):
+        if not isinstance(payload, list):
             raise ValueError(f"Malformed ARC rank prediction file: {path}")
-        predictions.extend(payload)
+        for value in payload:
+            if not isinstance(value, Mapping):
+                raise ValueError(f"Malformed ARC rank prediction file: {path}")
+            task_name = value.get("task_name")
+            input_hash = value.get("input_hash")
+            q_logit = value.get("q_logit")
+            row_index = value.get("row_index")
+            if (
+                not isinstance(task_name, str)
+                or not isinstance(input_hash, str)
+                or not input_hash
+                or isinstance(row_index, bool)
+                or not isinstance(row_index, int)
+            ):
+                raise ValueError(f"Malformed ARC rank prediction file: {path}")
+            try:
+                score = float(q_logit)
+                grid = _arc_grid(value.get("grid")).copy()
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    f"Malformed ARC rank prediction file: {path}"
+                ) from error
+            if not math.isfinite(score):
+                raise ValueError(f"Malformed ARC rank prediction file: {path}")
+            predictions.append(
+                ArcPrediction(
+                    task_name=task_name,
+                    input_hash=input_hash,
+                    grid=grid,
+                    q_logit=score,
+                    row_index=row_index,
+                )
+            )
     return predictions
 
 

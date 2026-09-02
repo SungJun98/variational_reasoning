@@ -51,6 +51,7 @@ Use `rrm/sh/maze_hard/fb_fprm.sh` for the Maze-Hard FPRM-backbone FB experiment.
 ## ARC-AGI launchers
 
 ARC-AGI-1 and ARC-AGI-2 use a dedicated evaluator in `rrm/arc.py` for augmentation inversion, Q-aware voting, task-normalized Pass@K, and submission generation.
+`DATASET` must contain `test/dataset.json`, the five `test/all__*.npy` arrays, `identifiers.json`, and `test_puzzles.json` produced by the ARC preprocessing pipeline.
 
 | Method | ARC-AGI-1 | ARC-AGI-2 |
 | --- | --- | --- |
@@ -59,7 +60,7 @@ ARC-AGI-1 and ARC-AGI-2 use a dedicated evaluator in `rrm/arc.py` for augmentati
 
 The launchers use eight `torchrun` processes, 25 candidates, and inference depth 16 by default.
 PTRM defaults to global batch size 32 and latent-noise scale 0.2, while W-PTRM defaults to global batch size 768 and parameter-perturbation scale 0.3.
-Set `NPROC_PER_NODE`, `CANDIDATE_COUNT`, `DEPTH`, `GLOBAL_BATCH_SIZE`, `SEED`, and the method-specific scale variable to override these values.
+Set `NPROC_PER_NODE`, `CANDIDATE_COUNT`, `DEPTH`, `GLOBAL_BATCH_SIZE`, `SEED`, `LATENT_NOISE_SCALE`, or `PARAMETER_PERTURBATION_SCALE` to override these values.
 Set `CONFIG` only when `all_config.yaml` is not next to the checkpoint, and set `GPU_IDS` to restrict the visible GPUs.
 
 ```bash

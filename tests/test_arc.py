@@ -5,6 +5,7 @@ import hashlib
 from dataclasses import replace
 import os
 from pathlib import Path
+import pickle
 import subprocess
 
 import numpy as np
@@ -128,6 +129,72 @@ def test_load_arc_dataset_rejects_identifier_outside_metadata_range(
     )
 
     with pytest.raises(ValueError, match="puzzle identifier"):
+        load_arc_dataset(root)
+
+
+def test_load_arc_dataset_rejects_noninteger_tokens(tmp_path: Path) -> None:
+    root = _write_arc_dataset(tmp_path / "arc")
+    np.save(
+        root / "test/all__inputs.npy",
+        np.zeros((2, 900), dtype=np.float32),
+    )
+
+    with pytest.raises(ValueError, match="inputs.*integer"):
+        load_arc_dataset(root)
+
+
+def test_load_arc_dataset_rejects_token_outside_vocabulary(
+    tmp_path: Path,
+) -> None:
+    root = _write_arc_dataset(tmp_path / "arc")
+    inputs = np.zeros((2, 900), dtype=np.uint8)
+    inputs[0, 0] = 12
+    np.save(root / "test/all__inputs.npy", inputs)
+
+    with pytest.raises(ValueError, match=r"inputs.*\[0, 11\]"):
+        load_arc_dataset(root)
+
+
+def test_load_arc_dataset_rejects_metadata_puzzle_count(
+    tmp_path: Path,
+) -> None:
+    root = _write_arc_dataset(tmp_path / "arc")
+    metadata_path = root / "test/dataset.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["total_puzzles"] = 2
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="total_puzzles"):
+        load_arc_dataset(root)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("pad_id", 1), ("ignore_label_id", None), ("blank_identifier_id", 1)),
+)
+def test_load_arc_dataset_rejects_nonofficial_special_token_ids(
+    tmp_path: Path, field: str, value: int | None
+) -> None:
+    root = _write_arc_dataset(tmp_path / "arc")
+    metadata_path = root / "test/dataset.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata[field] = value
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="special token IDs"):
+        load_arc_dataset(root)
+
+
+def test_load_arc_dataset_rejects_identifier_task_outside_sidecar(
+    tmp_path: Path,
+) -> None:
+    root = _write_arc_dataset(tmp_path / "arc")
+    (root / "identifiers.json").write_text(
+        json.dumps(["<blank>", "unknown|||t0|||0123456789"]),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="identifier tasks"):
         load_arc_dataset(root)
 
 
@@ -573,7 +640,7 @@ def test_validate_checkpoint_identifier_rows_rejects_dataset_mismatch() -> None:
         arc.validate_checkpoint_identifier_rows(state, expected_rows=3)
 
 
-def test_load_arc_model_strict_loads_the_released_checkpoint_shape(
+def test_load_arc_model_strict_loads_released_and_rrm_checkpoint_shapes(
     tmp_path: Path,
 ) -> None:
     arch = {
@@ -583,13 +650,11 @@ def test_load_arc_model_strict_loads_the_released_checkpoint_shape(
     }
     source = ptrm.TinyRecursiveReasoningModel(arch)
     checkpoint = tmp_path / "checkpoint.pt"
-    torch.save(
-        {
-            f"_orig_mod.model.{name}": value.detach().clone()
-            for name, value in source.state_dict().items()
-        },
-        checkpoint,
-    )
+    released_state = {
+        f"_orig_mod.model.{name}": value.detach().clone()
+        for name, value in source.state_dict().items()
+    }
+    torch.save(released_state, checkpoint)
     config_path = tmp_path / "all_config.yaml"
     config_path.write_text(
         "arch:\n"
@@ -628,8 +693,26 @@ def test_load_arc_model_strict_loads_the_released_checkpoint_shape(
     for name, value in source.state_dict().items():
         assert torch.equal(loaded.state_dict()[name], value)
 
+    rrm_checkpoint = tmp_path / "rrm_checkpoint.pt"
+    torch.save(
+        {
+            "format": "RRM_CHECKPOINT_V1",
+            "model_state": released_state,
+            "rng_state": {"numpy": np.random.get_state()},
+        },
+        rrm_checkpoint,
+    )
+    wrapped = arc.load_arc_model(
+        replace(config, checkpoint=rrm_checkpoint),
+        dataset,
+        device=torch.device("cpu"),
+    )
 
-def _write_synthetic_evaluation_dataset(root: Path) -> Path:
+    for name, value in source.state_dict().items():
+        assert torch.equal(wrapped.state_dict()[name], value)
+
+
+def _write_synthetic_evaluation_dataset(root: Path, *, row_count: int = 2) -> Path:
     test_root = root / "test"
     test_root.mkdir(parents=True)
     metadata = {
@@ -641,25 +724,25 @@ def _write_synthetic_evaluation_dataset(root: Path) -> Path:
         "num_puzzle_identifiers": 3,
         "total_groups": 1,
         "mean_puzzle_examples": 1.0,
-        "total_puzzles": 2,
+        "total_puzzles": row_count,
         "sets": ["all"],
     }
     (test_root / "dataset.json").write_text(json.dumps(metadata), encoding="utf-8")
-    inputs = np.stack([_encoded_grid([[0]]), _encoded_grid([[0]])])
-    labels = np.stack([_encoded_grid([[1]]), _encoded_grid([[1]])])
+    inputs = np.stack([_encoded_grid([[0]]) for _ in range(row_count)])
+    labels = np.stack([_encoded_grid([[1]]) for _ in range(row_count)])
     np.save(test_root / "all__inputs.npy", inputs)
     np.save(test_root / "all__labels.npy", labels)
     np.save(
         test_root / "all__puzzle_identifiers.npy",
-        np.array([1, 2], dtype=np.int32),
+        np.array([1, *([2] * (row_count - 1))], dtype=np.int32),
     )
     np.save(
         test_root / "all__puzzle_indices.npy",
-        np.array([0, 1, 2], dtype=np.int32),
+        np.arange(row_count + 1, dtype=np.int32),
     )
     np.save(
         test_root / "all__group_indices.npy",
-        np.array([0, 2], dtype=np.int32),
+        np.array([0, row_count], dtype=np.int32),
     )
     (root / "identifiers.json").write_text(
         json.dumps(["<blank>", "task", "task|||t0|||0123456789"]),
@@ -715,6 +798,49 @@ class _LiteralCandidateAdapter:
         return predictions, scores
 
 
+def _distributed_arc_worker(
+    rank: int, dataset_text: str, output_text: str, rendezvous_text: str
+) -> None:
+    torch.distributed.init_process_group(
+        backend="gloo",
+        init_method=f"file://{rendezvous_text}",
+        rank=rank,
+        world_size=2,
+    )
+    try:
+        dataset_path = Path(dataset_text)
+        dataset = load_arc_dataset(dataset_path)
+        config = arc.ArcEvaluationConfig(
+            task="arc-agi-1",
+            checkpoint=dataset_path / "unused.pt",
+            config=dataset_path / "unused.yaml",
+            dataset=dataset_path,
+            output=Path(output_text),
+            candidate_count=2,
+            depth=16,
+            global_batch_size=2,
+            seed=0,
+            device="cpu",
+            latent_noise_scale=0.2,
+            parameter_perturbation_scale=None,
+            max_batches=None,
+        )
+        arc.run_arc_evaluation(
+            config,
+            dataset,
+            model=_bank_model(),
+            adapter=_LiteralCandidateAdapter(),
+            context=DistributedContext(
+                rank,
+                2,
+                rank,
+                torch.device("cpu"),
+            ),
+        )
+    finally:
+        torch.distributed.destroy_process_group()
+
+
 def test_run_arc_evaluation_writes_official_outputs_from_real_dataset(
     tmp_path: Path,
 ) -> None:
@@ -762,7 +888,11 @@ def test_run_arc_evaluation_writes_official_outputs_from_real_dataset(
     resolved = json.loads((config.output / "resolved_config.json").read_text())
     assert resolved["method"] == "ptrm"
     assert resolved["candidate_count"] == 2
-    assert (config.output / "rank_predictions/rank_0_predictions.pkl").is_file()
+    rank_path = config.output / "rank_predictions/rank_0_predictions.pkl"
+    with rank_path.open("rb") as handle:
+        rank_payload = pickle.load(handle)
+    assert rank_payload[0]["task_name"] == "task"
+    assert rank_payload[0]["row_index"] == 0
     assert (config.output / "rank_0_runtime.json").is_file()
 
 
@@ -804,6 +934,34 @@ def test_run_arc_evaluation_reuses_one_w_ptrm_bank_across_batches(
     assert torch.equal(adapter.parameter_vectors[1], adapter.parameter_vectors[3])
     assert not torch.equal(adapter.parameter_vectors[0], adapter.parameter_vectors[1])
     assert torch.equal(_parameter_vector(model), original)
+
+
+def test_run_arc_evaluation_aggregates_two_gloo_ranks_and_partial_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = _write_synthetic_evaluation_dataset(tmp_path / "dataset", row_count=3)
+    output = tmp_path / "output"
+    rendezvous = tmp_path / "gloo-rendezvous"
+
+    monkeypatch.setenv("MKL_THREADING_LAYER", "GNU")
+    torch.multiprocessing.spawn(
+        _distributed_arc_worker,
+        args=(str(dataset), str(output), str(rendezvous)),
+        nprocs=2,
+        join=True,
+    )
+
+    assert (
+        json.loads((output / "metrics.json").read_text(encoding="utf-8"))["ARC/pass@1"]
+        == 1.0
+    )
+    rank_rows = []
+    for rank in range(2):
+        with (output / "rank_predictions" / f"rank_{rank}_predictions.pkl").open(
+            "rb"
+        ) as handle:
+            rank_rows.append([value["row_index"] for value in pickle.load(handle)])
+    assert rank_rows == [[0, 2], [1]]
 
 
 @pytest.mark.parametrize(
