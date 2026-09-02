@@ -6,7 +6,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
+from rrm import ptrm
 from rrm.arc import (
     ArcDataset,
     ArcPrediction,
@@ -256,4 +258,131 @@ def test_aggregate_arc_predictions_rejects_missing_test_pair() -> None:
             test_puzzles=test_puzzles,
             pass_ks=(1,),
             submission_k=2,
+        )
+
+
+def _tiny_arc_ptrm_config() -> dict[str, object]:
+    return {
+        "batch_size": 1,
+        "seq_len": 900,
+        "puzzle_emb_ndim": 0,
+        "num_puzzle_identifiers": 1,
+        "vocab_size": 12,
+        "H_cycles": 1,
+        "L_cycles": 1,
+        "H_layers": 0,
+        "L_layers": 1,
+        "hidden_size": 8,
+        "expansion": 1.0,
+        "num_heads": 2,
+        "pos_encodings": "none",
+        "halt_max_steps": 16,
+        "halt_exploration_prob": 0.0,
+        "forward_dtype": "float32",
+        "mlp_t": False,
+        "puzzle_emb_len": 0,
+        "no_ACT_continue": True,
+    }
+
+
+@pytest.mark.parametrize("task", ("arc-agi-1", "arc-agi-2"))
+def test_ptrm_adapter_accepts_arc_task_names(task: str) -> None:
+    model = ptrm.ADAPTER.build_model(
+        task,
+        "ptrm",
+        {
+            "arch": _tiny_arc_ptrm_config(),
+            "candidate_count": 25,
+            "latent_noise_sigma": 0.2,
+            "inference_depth": 16,
+        },
+    )
+
+    assert model._rrm_candidate_count == 25
+    assert model._rrm_latent_noise_sigma == 0.2
+    assert model._rrm_inference_depth == 16
+
+
+def test_ptrm_adapter_still_rejects_unknown_task_name() -> None:
+    with pytest.raises(ValueError, match="does not support task"):
+        ptrm.ADAPTER.build_model(
+            "unknown", "ptrm", {"arch": _tiny_arc_ptrm_config()}
+        )
+
+
+def _bank_model() -> torch.nn.Linear:
+    model = torch.nn.Linear(2, 1, bias=True)
+    with torch.no_grad():
+        model.weight.copy_(torch.tensor([[1.0, -2.0]]))
+        model.bias.copy_(torch.tensor([0.5]))
+    return model
+
+
+def _parameter_vector(model: torch.nn.Module) -> torch.Tensor:
+    return torch.cat(
+        [parameter.detach().reshape(-1) for parameter in model.parameters()]
+    )
+
+
+def test_parameter_perturbation_bank_reuses_fixed_candidates_and_restores() -> None:
+    model = _bank_model()
+    original = _parameter_vector(model).clone()
+    bank = ptrm.ParameterPerturbationBank.sample(
+        model,
+        candidate_count=3,
+        relative_scale=0.3,
+        generator=torch.Generator().manual_seed(17),
+    )
+
+    bank.apply(0)
+    candidate_zero = _parameter_vector(model).clone()
+    bank.apply(1)
+    candidate_one = _parameter_vector(model).clone()
+    bank.apply(0)
+    repeated_zero = _parameter_vector(model).clone()
+    bank.restore()
+
+    assert not torch.equal(candidate_zero, original)
+    assert not torch.equal(candidate_zero, candidate_one)
+    assert torch.equal(repeated_zero, candidate_zero)
+    assert torch.equal(_parameter_vector(model), original)
+
+
+def test_parameter_perturbation_bank_is_deterministic_for_a_fixed_seed() -> None:
+    first_model = _bank_model()
+    second_model = _bank_model()
+    first = ptrm.ParameterPerturbationBank.sample(
+        first_model,
+        candidate_count=2,
+        relative_scale=0.3,
+        generator=torch.Generator().manual_seed(23),
+    )
+    second = ptrm.ParameterPerturbationBank.sample(
+        second_model,
+        candidate_count=2,
+        relative_scale=0.3,
+        generator=torch.Generator().manual_seed(23),
+    )
+
+    first.apply(1)
+    second.apply(1)
+
+    assert torch.equal(
+        _parameter_vector(first_model), _parameter_vector(second_model)
+    )
+
+
+@pytest.mark.parametrize(
+    ("candidate_count", "relative_scale", "message"),
+    ((0, 0.3, "candidate count"), (2, -0.1, "relative scale")),
+)
+def test_parameter_perturbation_bank_rejects_invalid_protocol(
+    candidate_count: int, relative_scale: float, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        ptrm.ParameterPerturbationBank.sample(
+            _bank_model(),
+            candidate_count=candidate_count,
+            relative_scale=relative_scale,
+            generator=torch.Generator().manual_seed(0),
         )
